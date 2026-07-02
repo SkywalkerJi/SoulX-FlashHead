@@ -77,3 +77,83 @@ def test_short_out_audio_padded_to_nominal():
     _, sout = got
     assert len(sout) == SLICE_OUT
     np.testing.assert_allclose(sout[-100:], 0.0)
+
+
+def _feed_one_slice(proc, value16=0.5, value_out=0.25):
+    a16 = np.full(SLICE_16K, value16, np.float32)
+    aout = np.full(SLICE_OUT, value_out, np.float32)
+    proc.add_audio(a16, aout)
+    got = proc._try_extract_slice()
+    assert got is not None
+    proc._process_slice(*got)
+
+
+def test_process_slice_enqueues_paired_frames_and_audio():
+    proc, gen = make_proc()
+    _feed_one_slice(proc, value_out=0.25)
+    pairs = []
+    while True:
+        p = proc.get_pair()
+        if p is None:
+            break
+        pairs.append(p)
+    assert len(pairs) == SLICE_LEN
+    frame, seg = pairs[0]
+    assert frame.shape == (4, 4, 3) and frame.dtype == np.uint8
+    assert seg.shape == (PER_FRAME_OUT,)
+    # 24 段音频拼回来应等于整片
+    joined = np.concatenate([s for _, s in pairs])
+    np.testing.assert_allclose(joined, np.full(SLICE_OUT, 0.25, np.float32))
+
+
+def test_window_slides_with_input_slice():
+    proc, gen = make_proc()
+    marker = np.linspace(0.1, 0.9, SLICE_16K).astype(np.float32)
+    proc.add_audio(marker, np.zeros(SLICE_OUT, np.float32))
+    proc._process_slice(*proc._try_extract_slice())
+    window = gen.windows[0]
+    assert len(window) == SR * 8
+    np.testing.assert_allclose(window[-SLICE_16K:], marker, atol=1e-6)
+    np.testing.assert_allclose(window[:-SLICE_16K], 0.0)  # 初始滑窗为静音
+
+
+def test_noise_gate_feeds_zeros_to_window_but_keeps_playback_audio():
+    proc, gen = make_proc(noise_gate_rms=0.05)
+    quiet16 = np.full(SLICE_16K, 0.01, np.float32)   # RMS=0.01 < 0.05
+    quiet_out = np.full(SLICE_OUT, 0.01, np.float32)
+    proc.add_audio(quiet16, quiet_out)
+    proc._process_slice(*proc._try_extract_slice())
+    np.testing.assert_allclose(gen.windows[0][-SLICE_16K:], 0.0)  # 管线吃到零
+    _, seg = proc.get_pair()
+    np.testing.assert_allclose(seg, 0.01)                          # 回放原声不动
+
+
+def test_backlog_drops_oldest_chunk():
+    proc, gen = make_proc(max_backlog_chunks=2)
+    for _ in range(3):  # 入 3 chunk 不消费 → 第 3 次入队前应丢最旧 24 帧
+        _feed_one_slice(proc)
+    assert proc.stats["dropped_frames"] == SLICE_LEN
+    assert proc._pairs.qsize() == 2 * SLICE_LEN
+    frame, _ = proc.get_pair()
+    assert frame[0, 0, 0] == 1  # chunk#0(值0)被丢，队头是 chunk#1
+
+
+def test_worker_thread_end_to_end():
+    proc, gen = make_proc()
+    proc.start()
+    try:
+        proc.add_audio(np.ones(SLICE_16K, np.float32), np.ones(SLICE_OUT, np.float32))
+        deadline = time.time() + 5
+        pairs = []
+        while len(pairs) < SLICE_LEN and time.time() < deadline:
+            p = proc.get_pair()
+            if p is not None:
+                pairs.append(p)
+            else:
+                time.sleep(0.01)
+        assert len(pairs) == SLICE_LEN
+        assert proc.stats["chunks_done"] == 1
+        assert proc.stats["last_chunk_ms"] >= 0.0
+    finally:
+        proc.stop()
+    assert not proc._worker.is_alive()

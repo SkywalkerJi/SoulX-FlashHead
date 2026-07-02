@@ -82,3 +82,73 @@ class RealtimeProcessor:
                     [sout, np.zeros(self.slice_samples_out - take, dtype=np.float32)]
                 )
             return s16, sout
+
+    # ---------- 推理与配对 ----------
+    def _process_slice(self, s16: np.ndarray, sout: np.ndarray) -> None:
+        """一个 chunk：噪声门限 → 滑窗推进 → 推理 → 追赶丢帧 → 逐帧配对入队。"""
+        if self.noise_gate_rms > 0.0:
+            rms = float(np.sqrt(np.mean(np.square(s16))))
+            if rms < self.noise_gate_rms:
+                s16 = np.zeros_like(s16)
+
+        self._window.extend(s16.tolist())
+        window = np.array(self._window, dtype=np.float32)
+
+        t0 = time.monotonic()
+        frames = self._generate_chunk(window)  # (slice_len, H, W, 3) uint8 RGB
+        self.stats["last_chunk_ms"] = (time.monotonic() - t0) * 1000.0
+        self.stats["chunks_done"] += 1
+
+        # 追赶：积压超过 max_backlog_chunks 个 chunk 时丢最旧一个 chunk
+        if self._pairs.qsize() >= self.max_backlog_chunks * self.slice_len:
+            for _ in range(self.slice_len):
+                try:
+                    self._pairs.get_nowait()
+                    self.stats["dropped_frames"] += 1
+                except queue.Empty:
+                    break
+
+        spf = self.samples_per_frame_out
+        for i in range(frames.shape[0]):
+            seg = sout[i * spf: (i + 1) * spf]
+            if len(seg) < spf:
+                seg = np.concatenate([seg, np.zeros(spf - len(seg), dtype=np.float32)])
+            self._pairs.put((frames[i], seg))
+        self.stats["queue_depth"] = self._pairs.qsize()
+
+    # ---------- 输出侧 ----------
+    def get_pair(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        try:
+            pair = self._pairs.get_nowait()
+        except queue.Empty:
+            self.stats["queue_depth"] = 0
+            return None
+        self.stats["queue_depth"] = self._pairs.qsize()
+        return pair
+
+    # ---------- 工作线程 ----------
+    def start(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        self._stop_event.clear()
+        self._worker = threading.Thread(
+            target=self._worker_loop, daemon=True, name="RealtimeProcessor",
+        )
+        self._worker.start()
+
+    def _worker_loop(self) -> None:
+        while not self._stop_event.is_set():
+            with self._in_cond:
+                if len(self._pending_16k) < self.slice_samples_16k:
+                    self._in_cond.wait(timeout=0.1)
+            got = self._try_extract_slice()
+            if got is None:
+                continue
+            self._process_slice(*got)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        with self._in_cond:
+            self._in_cond.notify_all()
+        if self._worker is not None and self._worker.is_alive():
+            self._worker.join(timeout=3)
