@@ -137,6 +137,17 @@ python gradio_app.py
 python gradio_app_streaming.py
 ```
 
+### Real-time Microphone-driven Panel (WebRTC)
+
+Speak into your microphone and the avatar lip-syncs in real time (~2s glass-to-glass latency, lite model).
+
+```bash
+pip install -r requirements_realtime.txt
+# Behind an HTTPS-only proxy (e.g. RunPod), a TURN relay is required:
+export HF_TOKEN=your_hf_token   # free 10GB/month Cloudflare TURN via fastrtc
+python gradio_app_realtime.py
+```
+
 ### 🤗 Streaming online demo
 Click [here](https://huggingface.co/spaces/Soul-AILab/SoulX-FlashHead) to experience the real-time streaming demo on HuggingFace Spaces.
 
