@@ -14,6 +14,15 @@ import numpy as np
 
 
 class RealtimeProcessor:
+    """实时流式处理器，管理音频攒片、滑窗、chunk 推理与帧音频配对。
+
+    线程契约：
+    - add_audio() 是唯一的生产者入口，可从任意单一线程调用；
+    - _try_extract_slice() / _process_slice() 只能由 worker 线程（start() 启动）串行调用，
+      外部代码不得在 worker 运行期间直接调用二者，否则 _window 与 stats 会产生竞态；
+    - get_pair() 供单一消费者线程调用；
+    - stats 为无锁写入的近似值，仅供状态展示，不可用于精确控制逻辑。
+    """
     def __init__(
         self,
         generate_chunk: Callable[[np.ndarray], np.ndarray],
@@ -48,6 +57,7 @@ class RealtimeProcessor:
         self._stop_event = threading.Event()
         self._worker: Optional[threading.Thread] = None
 
+        # 无锁写入的近似统计，仅供 UI 展示（见类 docstring 线程契约）
         self.stats = {
             "last_chunk_ms": 0.0,
             "queue_depth": 0,
@@ -85,7 +95,9 @@ class RealtimeProcessor:
 
     # ---------- 推理与配对 ----------
     def _process_slice(self, s16: np.ndarray, sout: np.ndarray) -> None:
-        """一个 chunk：噪声门限 → 滑窗推进 → 推理 → 追赶丢帧 → 逐帧配对入队。"""
+        """一个 chunk：噪声门限 → 滑窗推进 → 推理 → 追赶丢帧 → 逐帧配对入队。
+
+        注意：仅允许 worker 线程串行调用（见类 docstring 线程契约）。"""
         if self.noise_gate_rms > 0.0:
             rms = float(np.sqrt(np.mean(np.square(s16))))
             if rms < self.noise_gate_rms:
