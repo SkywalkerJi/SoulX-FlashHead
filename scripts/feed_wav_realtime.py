@@ -79,18 +79,18 @@ def main():
                            aout[fed * step_out:(fed + 1) * step_out])
             fed += 1
             next_feed += args.feed_step
-        p = proc.get_pair()
-        if p is not None:
-            frames.append(p[0])
-            continue
         cd = proc.stats["chunks_done"]
-        if cd > last_chunks_done:  # 仅日志采样(近似值),不参与控制流
+        if cd > last_chunks_done:  # 每次迭代无条件检查;近似值仅用于日志,不参与控制流
             times.append(proc.stats["last_chunk_ms"])
             last_chunks_done = cd
             logger.info(
                 f"chunk-{len(times) - 1}: {times[-1]:.0f}ms "
                 f"({slice_len}帧, 预算 {slice_len / params['tgt_fps'] * 1000:.0f}ms)"
             )
+        p = proc.get_pair()
+        if p is not None:
+            frames.append(p[0])
+            continue
         time.sleep(0.005)
     proc.stop()
 
