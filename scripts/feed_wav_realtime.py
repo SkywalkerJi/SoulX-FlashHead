@@ -34,6 +34,8 @@ def main():
     ap.add_argument("--audio_path", required=True)
     ap.add_argument("--max_seconds", type=float, default=20.0)
     ap.add_argument("--feed_step", type=float, default=0.5, help="模拟麦克风每次送入的秒数")
+    ap.add_argument("--timeout", type=float, default=600.0,
+                    help="总超时秒数(首 chunk 含 torch.compile 预热可达数十秒)")
     args = ap.parse_args()
 
     pipeline = get_pipeline(1, args.ckpt_dir, args.model_type, args.wav2vec_dir)
@@ -59,47 +61,66 @@ def main():
     step_out = int(args.feed_step * OUT_SR)
     n_steps = len(a16) // step16
 
+    slice_len = params["frame_num"] - params["motion_frames_num"]
+    expected_chunks = (n_steps * step16) // proc.slice_samples_16k
+    expected_frames = expected_chunks * slice_len
+
     frames, times = [], []
+    last_chunks_done = 0
+    fed = 0
     t_start = time.time()
-    for i in range(n_steps):
-        proc.add_audio(a16[i * step16:(i + 1) * step16], aout[i * step_out:(i + 1) * step_out])
-        while True:
-            p = proc.get_pair()
-            if p is None:
-                break
-            frames.append(p[0])
-        if proc.stats["chunks_done"] > len(times):
-            times.append(proc.stats["last_chunk_ms"])
-            logger.info(
-                f"chunk-{len(times)-1}: {times[-1]:.0f}ms "
-                f"({params['frame_num'] - params['motion_frames_num']}帧, "
-                f"预算 {(params['frame_num'] - params['motion_frames_num']) / params['tgt_fps'] * 1000:.0f}ms)"
-            )
-    # 排空
-    deadline = time.time() + 30
-    while time.time() < deadline:
+    next_feed = time.monotonic()
+    deadline = time.time() + args.timeout
+    # 单循环贯穿喂入(按 feed_step 节拍模拟麦克风)与消费;
+    # 退出条件用先验的 expected_frames(确定性),不依赖 stats(仅供展示的近似值)
+    while len(frames) < expected_frames and time.time() < deadline:
+        if fed < n_steps and time.monotonic() >= next_feed:
+            proc.add_audio(a16[fed * step16:(fed + 1) * step16],
+                           aout[fed * step_out:(fed + 1) * step_out])
+            fed += 1
+            next_feed += args.feed_step
         p = proc.get_pair()
-        if p is None:
-            if proc.stats["chunks_done"] * (params["frame_num"] - params["motion_frames_num"]) <= len(frames):
-                break
-            time.sleep(0.05)
+        if p is not None:
+            frames.append(p[0])
             continue
-        frames.append(p[0])
+        cd = proc.stats["chunks_done"]
+        if cd > last_chunks_done:  # 仅日志采样(近似值),不参与控制流
+            times.append(proc.stats["last_chunk_ms"])
+            last_chunks_done = cd
+            logger.info(
+                f"chunk-{len(times) - 1}: {times[-1]:.0f}ms "
+                f"({slice_len}帧, 预算 {slice_len / params['tgt_fps'] * 1000:.0f}ms)"
+            )
+        time.sleep(0.005)
     proc.stop()
 
+    if len(frames) < expected_frames:
+        logger.error(
+            f"超时退出: 仅收到 {len(frames)}/{expected_frames} 帧"
+            f"(chunk {last_chunks_done}/{expected_chunks});"
+            f"若首 chunk 预热超过 {args.timeout:.0f}s 请加大 --timeout 重试"
+        )
+
     total = time.time() - t_start
-    steady = times[2:] if len(times) > 3 else times  # 丢 compile 预热
-    slice_len = params["frame_num"] - params["motion_frames_num"]
-    logger.info(f"总帧数 {len(frames)}, 总耗时 {total:.1f}s, 稳态每chunk {np.mean(steady):.0f}ms "
-                f"(实时预算 {slice_len / params['tgt_fps'] * 1000:.0f}ms), "
-                f"有效FPS {slice_len / (np.mean(steady) / 1000):.1f}")
+    steady = times[2:] if len(times) > 3 else times
+    if steady:
+        logger.info(
+            f"总帧数 {len(frames)}, 总耗时 {total:.1f}s, 稳态每chunk {np.mean(steady):.0f}ms "
+            f"(实时预算 {slice_len / params['tgt_fps'] * 1000:.0f}ms), "
+            f"有效FPS {slice_len / (np.mean(steady) / 1000):.1f}"
+        )
+    else:
+        logger.warning("未采集到 chunk 耗时样本")
 
     os.makedirs("gradio_results", exist_ok=True)
-    out = "gradio_results/feed_wav_preview.mp4"
-    with imageio.get_writer(out, format="mp4", mode="I", fps=params["tgt_fps"], codec="h264") as w:
-        for f in frames:
-            w.append_data(f)
-    logger.info(f"预览已存 {out}（无音轨，仅看口型节奏）")
+    if frames:
+        out = "gradio_results/feed_wav_preview.mp4"
+        with imageio.get_writer(out, format="mp4", mode="I", fps=params["tgt_fps"], codec="h264") as w:
+            for f in frames:
+                w.append_data(f)
+        logger.info(f"预览已存 {out}（无音轨，仅看口型节奏）")
+    else:
+        logger.warning("无帧可写,跳过预览 mp4")
 
 
 if __name__ == "__main__":
