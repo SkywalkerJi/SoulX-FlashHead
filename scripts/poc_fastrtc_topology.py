@@ -5,10 +5,15 @@
   2. 页面能看到服务端生成的测试画面（帧计数 + 音量条），~25fps 平滑
   3. 能听到自己麦克风的回声（音频下行通了）
 决策门:
-  - 全部通过 → Task 5 用原版 fastrtc
-  - 视频下行不出现 → 依次尝试: a) track_constraints 变体
-    b) pip install gradio-webrtc（HumanAIGC-Engineering fork）改 import 重试
-    把结论写进本文件头部注释并提交。
+  - 三条标准全过 → Task 5 用原版 fastrtc
+  - 标准1失败(仍弹摄像头权限) → 依次尝试 track_constraints 变体
+    ({"video": False} / 省略 video 键 / {"audio": {...}});全部无效 →
+    pip install gradio-webrtc(HumanAIGC-Engineering fork)改 import 重试
+  - 标准2失败(视频下行不出现) → 同上,先 track_constraints 变体再 fork
+  - 标准3失败(听不到回声) → 用 inspect 核对安装版 emit() 的返回格式契约
+    (采样率/形状/dtype),修正后重试;仍失败再考虑 fork
+  把最终结论(用哪个包、有效的 track_constraints 写法、实测签名差异)
+  写进本文件头部注释并提交。
 
 RunPod 运行:
   HF_TOKEN=hf_xxx python scripts/poc_fastrtc_topology.py
@@ -16,7 +21,6 @@ RunPod 运行:
 """
 import asyncio
 import os
-import time
 
 import gradio as gr
 import numpy as np
@@ -56,6 +60,9 @@ def build_webrtc_kwargs():
         kwargs["server_rtc_configuration"] = get_cloudflare_turn_credentials(
             hf_token=token, ttl=360_000,  # 服务端凭证要长 TTL
         )
+    elif token:
+        print("[PoC] 注意: 安装版 WebRTC 组件不支持 server_rtc_configuration 参数,"
+              "已跳过服务端 ICE 配置——请在 PoC 结论中记录服务端经默认路径的实际连通性")
     return kwargs
 
 
@@ -64,7 +71,7 @@ class EchoPatternHandler(AsyncAudioVideoStreamHandler):
 
     def __init__(self):
         super().__init__(expected_layout="mono", output_sample_rate=SR_OUT, fps=FPS)
-        self._audio_q: asyncio.Queue = asyncio.Queue()
+        self._audio_q: asyncio.Queue = asyncio.Queue(maxsize=50)  # ~1s@20ms帧,防回声延迟漂移
         self._rms = 0.0
         self._frame_id = 0
 
@@ -75,7 +82,14 @@ class EchoPatternHandler(AsyncAudioVideoStreamHandler):
         sr, arr = frame
         y = arr.astype(np.float32).reshape(-1) / 32768.0
         self._rms = float(np.sqrt(np.mean(np.square(y)) + 1e-12))
-        await self._audio_q.put((sr, arr))
+        try:
+            self._audio_q.put_nowait((sr, arr))
+        except asyncio.QueueFull:
+            try:
+                self._audio_q.get_nowait()  # 丢最旧,保持回声贴近实时
+            except asyncio.QueueEmpty:
+                pass
+            self._audio_q.put_nowait((sr, arr))
 
     async def video_emit(self):
         img = np.zeros((512, 512, 3), dtype=np.uint8)
