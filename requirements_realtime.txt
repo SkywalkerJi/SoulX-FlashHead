@@ -1,3 +1,4 @@
 # 实时流式面板专用依赖（gradio_app_realtime.py / scripts/poc_fastrtc_topology.py）
 # 主 requirements.txt 保持不变
 fastrtc==0.0.34
+soxr>=0.3.2   # receive() 上行重采样;虽是 librosa 的传递依赖,显式声明避免隐式耦合

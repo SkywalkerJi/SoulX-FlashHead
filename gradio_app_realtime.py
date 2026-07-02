@@ -3,7 +3,6 @@
 延迟预期 ~1.5-2.5s（0.96s 攒片 + 生成 + 传输），严格实时请用 lite 档。
 RunPod 部署需 export HF_TOKEN=...（Cloudflare TURN 中继，免费 10GB/月）。
 """
-import asyncio
 import os
 import threading
 
@@ -37,6 +36,10 @@ STATE = AppState()
 def load_model(ckpt_dir, wav2vec_dir, model_type, cond_image, seed, use_face_crop, noise_gate):
     if cond_image is None:
         raise gr.Error("请先选择条件图片")
+    # 先停旧 processor(join 推理线程),再动共享 pipeline 状态,避免与在飞 chunk 竞争
+    if STATE.processor is not None:
+        STATE.processor.stop()
+        STATE.processor = None
     key = (ckpt_dir, wav2vec_dir, model_type)
     if STATE.pipeline is None or STATE.loaded_key != key:
         logger.info(f"Loading pipeline: {key}")
@@ -45,8 +48,6 @@ def load_model(ckpt_dir, wav2vec_dir, model_type, cond_image, seed, use_face_cro
     get_base_data(STATE.pipeline, cond_image, int(seed) if seed >= 0 else 9999, use_face_crop)
     params = get_infer_params()
 
-    if STATE.processor is not None:
-        STATE.processor.stop()
     STATE.processor = RealtimeProcessor(
         generate_chunk=make_generate_chunk(STATE.pipeline, params),
         slice_len=params["frame_num"] - params["motion_frames_num"],
@@ -76,8 +77,12 @@ def get_rtc_config():
     if not token:
         logger.warning("未设置 HF_TOKEN：仅本地/局域网可连通；RunPod 需 TURN")
         return None
-    from fastrtc import get_cloudflare_turn_credentials
-    return get_cloudflare_turn_credentials(hf_token=token)
+    try:
+        from fastrtc import get_cloudflare_turn_credentials
+        return get_cloudflare_turn_credentials(hf_token=token)
+    except Exception as e:
+        logger.warning(f"获取 Cloudflare TURN 凭证失败({e})，回退直连（RunPod 代理后可能无法连通）")
+        return None
 
 
 def build_webrtc_kwargs():
@@ -95,10 +100,13 @@ def build_webrtc_kwargs():
     params = inspect.signature(WebRTC.__init__).parameters
     token = os.environ.get("HF_TOKEN")
     if token and "server_rtc_configuration" in params:
-        from fastrtc import get_cloudflare_turn_credentials
-        kwargs["server_rtc_configuration"] = get_cloudflare_turn_credentials(
-            hf_token=token, ttl=360_000,
-        )
+        try:
+            from fastrtc import get_cloudflare_turn_credentials
+            kwargs["server_rtc_configuration"] = get_cloudflare_turn_credentials(
+                hf_token=token, ttl=360_000,
+            )
+        except Exception as e:
+            logger.warning(f"获取服务端 TURN 凭证失败({e})，跳过服务端 ICE 配置")
     return kwargs
 
 
@@ -124,12 +132,24 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         self._recv_pending = np.zeros(0, dtype=np.float32)
         self._audio_buf = np.zeros(0, dtype=np.float32)
         self._buf_lock = threading.Lock()
+        self._recv_sr = None
 
     def copy(self):
+        # 新连接: 排空旧会话积压的配对帧,避免重连后先播过期口型
+        p = STATE.processor
+        if p is not None:
+            while p.get_pair() is not None:
+                pass
         return AvatarHandler()
 
     async def receive(self, frame):
         sr, arr = frame
+        if self._recv_sr is not None and sr != self._recv_sr and len(self._recv_pending) > 0:
+            logger.warning(
+                f"上行音频采样率变化 {self._recv_sr} -> {sr}, 丢弃 {len(self._recv_pending)} 个未处理样本"
+            )
+            self._recv_pending = np.zeros(0, dtype=np.float32)
+        self._recv_sr = sr
         y = arr.astype(np.float32).reshape(-1) / 32768.0
         self._recv_pending = np.concatenate([self._recv_pending, y])
         if len(self._recv_pending) < int(sr * RESAMPLE_BUF_SEC):
