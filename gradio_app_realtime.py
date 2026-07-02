@@ -79,7 +79,8 @@ def get_rtc_config():
         return None
     try:
         from fastrtc import get_cloudflare_turn_credentials
-        return get_cloudflare_turn_credentials(hf_token=token)
+        # 静态求值一次的配置必须用长 TTL(默认 600s 会导致启动 10 分钟后新连接全部失败)
+        return get_cloudflare_turn_credentials(hf_token=token, ttl=360_000)
     except Exception as e:
         logger.warning(f"获取 Cloudflare TURN 凭证失败({e})，回退直连（RunPod 代理后可能无法连通）")
         return None

@@ -164,3 +164,9 @@ class RealtimeProcessor:
             self._in_cond.notify_all()
         if self._worker is not None and self._worker.is_alive():
             self._worker.join(timeout=3)
+            if self._worker.is_alive():
+                import logging
+                logging.getLogger(__name__).warning(
+                    "RealtimeProcessor worker 在 3s 内未退出(可能正在推理长 chunk),"
+                    "其仍可能短暂持有 pipeline——避免在此期间变更 pipeline 状态"
+                )

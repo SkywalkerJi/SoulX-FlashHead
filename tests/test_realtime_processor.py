@@ -2,7 +2,6 @@
 import time
 
 import numpy as np
-import pytest
 
 from flash_head.realtime.processor import RealtimeProcessor
 
