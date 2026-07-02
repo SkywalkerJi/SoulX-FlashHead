@@ -1,0 +1,3 @@
+# 实时流式面板专用依赖（gradio_app_realtime.py / scripts/poc_fastrtc_topology.py）
+# 主 requirements.txt 保持不变
+fastrtc==0.0.34
