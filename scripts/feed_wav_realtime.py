@@ -11,7 +11,11 @@
 """
 import argparse
 import os
+import sys
 import time
+
+# 脚本位于 scripts/ 子目录,把仓库根目录加入 sys.path 以便 import flash_head
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import imageio
 import librosa
