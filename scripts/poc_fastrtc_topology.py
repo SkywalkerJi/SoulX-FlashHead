@@ -42,10 +42,11 @@ FPS = 25
 STUN_FALLBACK = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 
 
-def get_rtc_config(ttl=360_000):
+def get_rtc_config(ttl=86_400):
     """TURN 凭证优先级: 自有 Cloudflare key(直连 CF API) > HF_TOKEN(fastrtc
-    网关,2026-07 故障中) > STUN-only 回退。ttl 用长值:配置在组件构造时静态
-    求值一次,短 TTL 会导致服务启动一段时间后新连接全部失败。"""
+    网关,2026-07 故障中) > STUN-only 回退。ttl=24h:配置在组件构造时静态求值
+    一次,太短会导致服务启动一段时间后新连接失败;注意 Cloudflare 上限 48h,
+    超过会返回 400 invalid argument(已实测踩坑)。服务连续运行超过 ttl 需重启。"""
     key_id = os.environ.get("TURN_KEY_ID")
     api_token = os.environ.get("TURN_KEY_API_TOKEN")
     hf_token = os.environ.get("HF_TOKEN")
@@ -117,7 +118,8 @@ class EchoPatternHandler(AsyncAudioVideoStreamHandler):
         if self._n_recv == 1:
             print(f"[PoC] 上行音频已到达(sr={sr}, shape={arr.shape})", flush=True)
         y = arr.astype(np.float32).reshape(-1) / 32768.0
-        self._rms = float(np.sqrt(np.mean(np.square(y)) + 1e-12))
+        inst = float(np.sqrt(np.mean(np.square(y)) + 1e-12))
+        self._rms = 0.85 * self._rms + 0.15 * inst  # EMA 平滑,音量条不闪烁
         try:
             self._audio_q.put_nowait((sr, arr))
         except asyncio.QueueFull:
@@ -130,10 +132,17 @@ class EchoPatternHandler(AsyncAudioVideoStreamHandler):
     async def video_emit(self):
         if self._frame_id in (0, 25, 250):
             print(f"[PoC] video_emit 第{self._frame_id + 1}次被轮询", flush=True)
-        img = np.zeros((512, 512, 3), dtype=np.uint8)
-        bar = int(min(self._rms * 20.0, 1.0) * 500)
-        img[500 - bar:500, 100:412, 1] = 255                      # 音量条
-        img[10:30, 10:10 + (self._frame_id % 492), 2] = 255      # 帧计数走带
+        # 高可见度测试图案:深灰底 + 左右弹跳的白色大方块 + 平滑音量条 + 顶部走带
+        img = np.full((512, 512, 3), 40, dtype=np.uint8)
+        # 弹跳方块(2秒一个来回,视频通了绝对能看见)
+        t = self._frame_id % 100
+        x = int((t if t < 50 else 100 - t) / 50 * 380)
+        img[200:320, x:x + 120] = 255
+        # 平滑音量条(EMA,说话时红色竖条从底部升起)
+        bar = int(min(self._rms * 12.0, 1.0) * 460)
+        img[500 - bar:500, 20:80, :] = (60, 60, 255)
+        # 帧计数走带(顶部黄色横线,~20s 横穿一次)
+        img[10:40, 10:10 + (self._frame_id % 492)] = (0, 255, 255)
         self._frame_id += 1
         return img
 

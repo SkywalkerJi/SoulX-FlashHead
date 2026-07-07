@@ -77,11 +77,11 @@ def set_muted(play_audio: bool):
 STUN_FALLBACK = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 
 
-def get_rtc_config(ttl=360_000):
+def get_rtc_config(ttl=86_400):
     """TURN 凭证优先级: 自有 Cloudflare key(TURN_KEY_ID/TURN_KEY_API_TOKEN,
     直连 CF API) > HF_TOKEN(fastrtc 免费网关,2026-07 其 DNS 故障中) > STUN-only。
-    ttl 用长值:配置在组件构造时静态求值一次,短 TTL 会导致服务启动一段时间后
-    新连接全部失败。"""
+    ttl=24h:配置在组件构造时静态求值一次,太短会导致服务启动一段时间后新连接
+    失败;Cloudflare 上限 48h,超过返回 400(已实测)。服务连续运行超过 ttl 需重启。"""
     key_id = os.environ.get("TURN_KEY_ID")
     api_token = os.environ.get("TURN_KEY_API_TOKEN")
     hf_token = os.environ.get("HF_TOKEN")
