@@ -98,15 +98,24 @@ class EchoPatternHandler(AsyncAudioVideoStreamHandler):
         self._audio_q: asyncio.Queue = asyncio.Queue(maxsize=50)  # ~1s@20ms帧,防回声延迟漂移
         self._rms = 0.0
         self._frame_id = 0
+        # 诊断计数:确认四个回调是否被调用(黑屏排障用)
+        self._n_recv = 0
+        self._n_vrecv = 0
+        self._n_emit = 0
 
     def copy(self):
         return EchoPatternHandler()
 
     async def video_receive(self, frame):
-        pass  # 纯麦克风上行拓扑,不消费客户端视频(抽象方法需实现)
+        self._n_vrecv += 1
+        if self._n_vrecv == 1:
+            print(f"[PoC] 客户端视频轨已到达(首帧 shape={getattr(frame, 'shape', type(frame))})", flush=True)
 
     async def receive(self, frame):
         sr, arr = frame
+        self._n_recv += 1
+        if self._n_recv == 1:
+            print(f"[PoC] 上行音频已到达(sr={sr}, shape={arr.shape})", flush=True)
         y = arr.astype(np.float32).reshape(-1) / 32768.0
         self._rms = float(np.sqrt(np.mean(np.square(y)) + 1e-12))
         try:
@@ -119,6 +128,8 @@ class EchoPatternHandler(AsyncAudioVideoStreamHandler):
             self._audio_q.put_nowait((sr, arr))
 
     async def video_emit(self):
+        if self._frame_id in (0, 25, 250):
+            print(f"[PoC] video_emit 第{self._frame_id + 1}次被轮询", flush=True)
         img = np.zeros((512, 512, 3), dtype=np.uint8)
         bar = int(min(self._rms * 20.0, 1.0) * 500)
         img[500 - bar:500, 100:412, 1] = 255                      # 音量条
@@ -127,6 +138,9 @@ class EchoPatternHandler(AsyncAudioVideoStreamHandler):
         return img
 
     async def emit(self):
+        self._n_emit += 1
+        if self._n_emit == 1:
+            print("[PoC] emit(音频下行)第1次被轮询", flush=True)
         try:
             sr, arr = self._audio_q.get_nowait()
             return (sr, arr)
@@ -147,4 +161,6 @@ with gr.Blocks(title="fastrtc 拓扑 PoC", css=_CSS) as app:
                   concurrency_limit=1, time_limit=600)
 
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO)  # 输出 aiortc/fastrtc ICE 状态(排障)
     app.launch(server_name="0.0.0.0", server_port=7860)
