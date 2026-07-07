@@ -243,8 +243,11 @@ with gr.Blocks(title="SoulX-FlashHead 实时数字人", theme=gr.themes.Soft(), 
                 noise_gate_input = gr.Slider(label="噪声门限 RMS（0=关闭）",
                                              minimum=0.0, maximum=0.1, step=0.005, value=0.0)
 
-    # WebRTC 组件独占一行,置于控件区之下
-    webrtc = WebRTC(height=600, elem_id="rt-webrtc", **build_webrtc_kwargs())
+    # WebRTC 组件独占一行,置于控件区之下。
+    # full_screen=False 必须显式设置:默认 True 时组件以 position:fixed
+    # 全屏浮层渲染视频,会盖住页面上所有控件(实测踩坑)。
+    webrtc = WebRTC(height=600, elem_id="rt-webrtc", full_screen=False,
+                    **build_webrtc_kwargs())
 
     load_btn.click(
         fn=load_model,

@@ -165,7 +165,8 @@ _CSS = "footer {display: none !important} .webrtc-container {margin-bottom: 40px
 
 with gr.Blocks(title="fastrtc 拓扑 PoC", css=_CSS) as app:
     gr.Markdown("# PoC：麦克风驱动 + 音视频下行\n摄像头权限会弹出(已知限制,授权即可,画面被丢弃)。")
-    webrtc = WebRTC(height=600, **build_webrtc_kwargs())
+    # full_screen=False: 默认 True 时视频以 position:fixed 全屏浮层渲染,盖住页面控件
+    webrtc = WebRTC(height=600, full_screen=False, **build_webrtc_kwargs())
     webrtc.stream(EchoPatternHandler(), inputs=[webrtc], outputs=[webrtc],
                   concurrency_limit=1, time_limit=600)
 
