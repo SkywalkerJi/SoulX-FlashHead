@@ -72,18 +72,23 @@ def set_muted(play_audio: bool):
     return f"🔊 播放声音：{'开（给别人看）' if play_audio else '关（自己看，防回声）'}"
 
 
+# 无 TURN 时的 STUN-only 回退:浏览器可发现 srflx 候选,配合服务端出站 UDP
+# 打洞在部分 NAT 下可连通(2026-07 实测 turn.fastrtc.org 免费网关 DNS 故障)
+STUN_FALLBACK = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+
+
 def get_rtc_config():
     token = os.environ.get("HF_TOKEN")
     if not token:
-        logger.warning("未设置 HF_TOKEN：仅本地/局域网可连通；RunPod 需 TURN")
-        return None
+        logger.warning("未设置 HF_TOKEN：使用 STUN-only（跨公网 NAT 不保证连通，RunPod 建议配 TURN）")
+        return STUN_FALLBACK
     try:
         from fastrtc import get_cloudflare_turn_credentials
         # 静态求值一次的配置必须用长 TTL(默认 600s 会导致启动 10 分钟后新连接全部失败)
         return get_cloudflare_turn_credentials(hf_token=token, ttl=360_000)
     except Exception as e:
-        logger.warning(f"获取 Cloudflare TURN 凭证失败({e})，回退直连（RunPod 代理后可能无法连通）")
-        return None
+        logger.warning(f"获取 Cloudflare TURN 凭证失败({e})，回退 STUN-only（跨公网 NAT 不保证连通）")
+        return STUN_FALLBACK
 
 
 def build_webrtc_kwargs():

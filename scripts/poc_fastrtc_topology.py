@@ -30,12 +30,23 @@ SR_OUT = 48000
 FPS = 25
 
 
+# 无 TURN 时回退 STUN:浏览器至少能发现 srflx 候选,配合服务端出站 UDP
+# 打洞在部分 NAT 下可直连(2026-07 实测 turn.fastrtc.org 权威 DNS 故障,
+# 免费 TURN 网关不可用,STUN-only 是第一后备)
+STUN_FALLBACK = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+
+
 def get_rtc_config():
     token = os.environ.get("HF_TOKEN")
     if not token:
-        return None
-    from fastrtc import get_cloudflare_turn_credentials
-    return get_cloudflare_turn_credentials(hf_token=token)
+        print("[PoC] 无 HF_TOKEN,使用 STUN-only 配置(无 TURN 中继)")
+        return STUN_FALLBACK
+    try:
+        from fastrtc import get_cloudflare_turn_credentials
+        return get_cloudflare_turn_credentials(hf_token=token)
+    except Exception as e:
+        print(f"[PoC] 获取 TURN 凭证失败({e}),回退 STUN-only")
+        return STUN_FALLBACK
 
 
 def build_webrtc_kwargs():
@@ -56,10 +67,13 @@ def build_webrtc_kwargs():
     params = inspect.signature(WebRTC.__init__).parameters
     token = os.environ.get("HF_TOKEN")
     if token and "server_rtc_configuration" in params:
-        from fastrtc import get_cloudflare_turn_credentials
-        kwargs["server_rtc_configuration"] = get_cloudflare_turn_credentials(
-            hf_token=token, ttl=360_000,  # 服务端凭证要长 TTL
-        )
+        try:
+            from fastrtc import get_cloudflare_turn_credentials
+            kwargs["server_rtc_configuration"] = get_cloudflare_turn_credentials(
+                hf_token=token, ttl=360_000,  # 服务端凭证要长 TTL
+            )
+        except Exception as e:
+            print(f"[PoC] 获取服务端 TURN 凭证失败({e}),服务端走默认 ICE(Google STUN)")
     elif token:
         print("[PoC] 注意: 安装版 WebRTC 组件不支持 server_rtc_configuration 参数,"
               "已跳过服务端 ICE 配置——请在 PoC 结论中记录服务端经默认路径的实际连通性")
