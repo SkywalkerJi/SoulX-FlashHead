@@ -206,9 +206,12 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         pass
 
 
-with gr.Blocks(title="SoulX-FlashHead 实时数字人", theme=gr.themes.Soft()) as app:
+# 组件底部控制条会与 Gradio 页脚重叠导致按钮难点击 → 隐藏页脚
+_CSS = "footer {display: none !important}"
+
+with gr.Blocks(title="SoulX-FlashHead 实时数字人", theme=gr.themes.Soft(), css=_CSS) as app:
     gr.Markdown("# 🎙️ SoulX-FlashHead 实时数字人（麦克风直驱）")
-    gr.Markdown("加载模型 → 点击连接授权麦克风 → 开口说话，~2 秒后画面开始对口型。")
+    gr.Markdown("加载模型 → 点击连接授权麦克风与摄像头（摄像头画面会被丢弃，属组件限制）→ 开口说话，~2 秒后画面开始对口型。")
 
     with gr.Row():
         with gr.Column(scale=1):
@@ -228,7 +231,7 @@ with gr.Blocks(title="SoulX-FlashHead 实时数字人", theme=gr.themes.Soft()) 
                 noise_gate_input = gr.Slider(label="噪声门限 RMS（0=关闭）",
                                              minimum=0.0, maximum=0.1, step=0.005, value=0.0)
         with gr.Column(scale=1):
-            webrtc = WebRTC(**build_webrtc_kwargs())
+            webrtc = WebRTC(height=600, **build_webrtc_kwargs())
             play_audio_input = gr.Checkbox(label="播放声音（给别人看时打开）", value=False)
             mute_status = gr.Markdown("🔊 播放声音：关（自己看，防回声）")
             stats_md = gr.Markdown("")

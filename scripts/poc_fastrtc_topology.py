@@ -137,9 +137,12 @@ class EchoPatternHandler(AsyncAudioVideoStreamHandler):
         pass
 
 
-with gr.Blocks(title="fastrtc 拓扑 PoC") as app:
-    gr.Markdown("# PoC：纯麦克风上行 + 音视频下行\n点击连接后应只弹麦克风权限。")
-    webrtc = WebRTC(**build_webrtc_kwargs())
+# 组件底部控制条会与 Gradio 页脚重叠导致按钮难点击 → 隐藏页脚+固定高度
+_CSS = "footer {display: none !important} .webrtc-container {margin-bottom: 40px}"
+
+with gr.Blocks(title="fastrtc 拓扑 PoC", css=_CSS) as app:
+    gr.Markdown("# PoC：麦克风驱动 + 音视频下行\n摄像头权限会弹出(已知限制,授权即可,画面被丢弃)。")
+    webrtc = WebRTC(height=600, **build_webrtc_kwargs())
     webrtc.stream(EchoPatternHandler(), inputs=[webrtc], outputs=[webrtc],
                   concurrency_limit=1, time_limit=600)
 
