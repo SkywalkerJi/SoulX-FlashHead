@@ -63,14 +63,31 @@ class RealtimeProcessor:
             "queue_depth": 0,
             "dropped_frames": 0,
             "chunks_done": 0,
+            "dropped_input_ms": 0.0,
         }
 
     # ---------- 输入侧 ----------
     def add_audio(self, audio_16k: np.ndarray, audio_out: np.ndarray) -> None:
-        """追加一段麦克风音频。audio_16k 供管线推理；audio_out 为回放原声（output_sample_rate）。"""
+        """追加一段麦克风音频。audio_16k 供管线推理；audio_out 为回放原声（output_sample_rate）。
+
+        输入侧追赶：预热/慢 chunk 期间积压的旧音频直接丢弃（只保留最新
+        max_backlog_chunks 片）。没有这层封顶，积压音频会在恢复后被逐片
+        消化并持续顶满输出队列，造成长时间连续丢帧卡顿（实测踩坑）。
+        两侧缓冲各自截到自身上限，保留的都是"最新的等时长音频"，配对不错位。
+        """
         with self._in_cond:
             self._pending_16k = np.concatenate([self._pending_16k, audio_16k.astype(np.float32)])
             self._pending_out = np.concatenate([self._pending_out, audio_out.astype(np.float32)])
+
+            max_16k = self.max_backlog_chunks * self.slice_samples_16k
+            if len(self._pending_16k) > max_16k:
+                cut = len(self._pending_16k) - max_16k
+                self._pending_16k = self._pending_16k[cut:]
+                self.stats["dropped_input_ms"] += cut * 1000.0 / self.sample_rate
+            max_out = self.max_backlog_chunks * self.slice_samples_out
+            if len(self._pending_out) > max_out:
+                self._pending_out = self._pending_out[len(self._pending_out) - max_out:]
+
             self._in_cond.notify()
 
     def _try_extract_slice(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:

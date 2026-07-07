@@ -156,3 +156,19 @@ def test_worker_thread_end_to_end():
     finally:
         proc.stop()
     assert not proc._worker.is_alive()
+
+
+def test_input_backlog_trimmed_to_cap():
+    """输入侧追赶:一次性灌入超量音频(如预热期积压),只保留最新 N 片。"""
+    proc, _ = make_proc(max_backlog_chunks=2)
+    proc.add_audio(np.ones(SLICE_16K * 5, np.float32), np.ones(SLICE_OUT * 5, np.float32))
+    assert len(proc._pending_16k) == 2 * SLICE_16K
+    assert len(proc._pending_out) == 2 * SLICE_OUT
+    assert proc.stats["dropped_input_ms"] > 0
+
+
+def test_input_backlog_not_trimmed_below_cap():
+    proc, _ = make_proc(max_backlog_chunks=2)
+    proc.add_audio(np.ones(SLICE_16K, np.float32), np.ones(SLICE_OUT, np.float32))
+    assert len(proc._pending_16k) == SLICE_16K
+    assert proc.stats["dropped_input_ms"] == 0.0

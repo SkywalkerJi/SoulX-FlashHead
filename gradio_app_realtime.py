@@ -131,11 +131,12 @@ def format_stats():
     slice_len = p.slice_len
     budget_ms = slice_len / p.tgt_fps * 1000
     fps_eff = slice_len / (s["last_chunk_ms"] / 1000) if s["last_chunk_ms"] > 0 else 0
-    warn = " ⚠️ 生成速度不足，正在丢帧追赶" if s["dropped_frames"] > 0 else ""
+    # 按当前队列压力提示(而非累计丢帧数——预热期的一次性丢弃会让累计值永远>0)
+    warn = " ⚠️ 生成速度不足，正在丢帧追赶" if s["queue_depth"] >= p.max_backlog_chunks * slice_len else ""
     return (
         f"chunk 耗时 **{s['last_chunk_ms']:.0f}ms** / 预算 {budget_ms:.0f}ms ｜ "
         f"有效 **{fps_eff:.1f} FPS** ｜ 队列 {s['queue_depth']} 帧 ｜ "
-        f"已丢弃 {s['dropped_frames']} 帧{warn}"
+        f"累计丢弃 {s['dropped_frames']} 帧 / 旧音频 {s.get('dropped_input_ms', 0) / 1000:.1f}s{warn}"
     )
 
 
