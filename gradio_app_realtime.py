@@ -206,28 +206,31 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         pass
 
 
-# 隐藏页脚(与组件控制条重叠);强约束 WebRTC 组件内的视频元素——
-# 本地摄像头预览元素会溢出覆盖整个面板(实测),必须限制在组件框内
+# 隐藏页脚;WebRTC 组件内部视频元素给温和的高度上限(不动 position/width,
+# 强改会破坏组件内部布局——实测)。控件区与视频区改为上下结构,视频再大
+# 也盖不住按钮。
 _CSS = """
 footer {display: none !important}
-#rt-webrtc {max-height: 640px; overflow: hidden; position: relative;}
-#rt-webrtc video {
-  width: 100% !important; height: 560px !important;
-  max-height: 560px !important; object-fit: contain !important;
-  position: static !important; background: #111;
-}
+#rt-webrtc video {max-height: 62vh !important; object-fit: contain;}
 """
 
 with gr.Blocks(title="SoulX-FlashHead 实时数字人", theme=gr.themes.Soft(), css=_CSS) as app:
     gr.Markdown("# 🎙️ SoulX-FlashHead 实时数字人（麦克风直驱）")
-    gr.Markdown("加载模型 → 点击连接授权麦克风与摄像头（摄像头画面会被丢弃，属组件限制）→ 开口说话，~2 秒后画面开始对口型。")
+    gr.Markdown("加载模型 → 点击 Record 授权麦克风与摄像头（摄像头画面会被丢弃，属组件限制）→ "
+                "开口说话。首次说话后有约 1 分钟编译预热（仅一次），之后实时对口型。")
 
     with gr.Row():
         with gr.Column(scale=1):
             cond_image_input = gr.Image(label="Condition Image", type="filepath",
-                                        value="examples/girl.png", height=300)
+                                        value="examples/girl.png", height=220)
+        with gr.Column(scale=1):
             load_btn = gr.Button("📦 加载模型", variant="primary")
             load_status = gr.Markdown("⏳ 模型未加载")
+            play_audio_input = gr.Checkbox(label="播放声音（给别人看时打开）", value=False)
+            mute_status = gr.Markdown("🔊 播放声音：关（自己看，防回声）")
+            stats_md = gr.Markdown("")
+            timer = gr.Timer(1.0)
+        with gr.Column(scale=1):
             with gr.Accordion("⚙️ 高级设置", open=False):
                 ckpt_dir_input = gr.Textbox(label="FlashHead Checkpoint Directory",
                                             value="models/SoulX-FlashHead-1_3B")
@@ -239,12 +242,9 @@ with gr.Blocks(title="SoulX-FlashHead 实时数字人", theme=gr.themes.Soft(), 
                 seed_input = gr.Number(label="Random Seed", value=9999, precision=0)
                 noise_gate_input = gr.Slider(label="噪声门限 RMS（0=关闭）",
                                              minimum=0.0, maximum=0.1, step=0.005, value=0.0)
-        with gr.Column(scale=1):
-            webrtc = WebRTC(height=600, elem_id="rt-webrtc", **build_webrtc_kwargs())
-            play_audio_input = gr.Checkbox(label="播放声音（给别人看时打开）", value=False)
-            mute_status = gr.Markdown("🔊 播放声音：关（自己看，防回声）")
-            stats_md = gr.Markdown("")
-            timer = gr.Timer(1.0)
+
+    # WebRTC 组件独占一行,置于控件区之下
+    webrtc = WebRTC(height=600, elem_id="rt-webrtc", **build_webrtc_kwargs())
 
     load_btn.click(
         fn=load_model,
