@@ -34,8 +34,10 @@ STATE = AppState()
 
 
 def load_model(ckpt_dir, wav2vec_dir, model_type, cond_image, seed, use_face_crop, noise_gate):
+    """生成器:先 yield 加载中提示(立即刷新状态栏),完成后 yield 最终状态。"""
     if cond_image is None:
         raise gr.Error("请先选择条件图片")
+    yield f"⏳ 正在加载模型（{model_type}，约 1-2 分钟，请勿重复点击）..."
     # 先停旧 processor(join 推理线程),再动共享 pipeline 状态,避免与在飞 chunk 竞争
     if STATE.processor is not None:
         STATE.processor.stop()
@@ -63,8 +65,8 @@ def load_model(ckpt_dir, wav2vec_dir, model_type, cond_image, seed, use_face_cro
     rgb = ((ref[0, :, 0].permute(1, 2, 0) + 1) / 2 * 255).clamp(0, 255).byte().cpu().numpy()
     STATE.idle_frame = rgb[:, :, ::-1].copy()
 
-    warn = "  ⚠️ Pro 档单卡通常达不到 25FPS，会累积延迟" if model_type == "pro" else ""
-    return f"✅ 模型已加载（{model_type}），可点击下方连接开始{warn}"
+    warn = "  ⚠️ Pro 档单卡通常达不到 25FPS，会持续丢帧追赶" if model_type == "pro" else ""
+    yield f"✅ 模型已加载（{model_type}），可点击下方 Record 开始{warn}"
 
 
 def set_muted(play_audio: bool):
