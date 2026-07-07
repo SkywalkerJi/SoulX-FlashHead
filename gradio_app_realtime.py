@@ -140,6 +140,9 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         self._buf_lock = threading.Lock()
         self._recv_sr = None
 
+    async def video_receive(self, frame):
+        pass  # 纯麦克风上行,不消费客户端视频(基类抽象方法需实现)
+
     def copy(self):
         # 新连接: 排空旧会话积压的配对帧,避免重连后先播过期口型
         p = STATE.processor

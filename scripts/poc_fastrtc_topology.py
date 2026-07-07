@@ -92,6 +92,9 @@ class EchoPatternHandler(AsyncAudioVideoStreamHandler):
     def copy(self):
         return EchoPatternHandler()
 
+    async def video_receive(self, frame):
+        pass  # 纯麦克风上行拓扑,不消费客户端视频(抽象方法需实现)
+
     async def receive(self, frame):
         sr, arr = frame
         y = arr.astype(np.float32).reshape(-1) / 32768.0
