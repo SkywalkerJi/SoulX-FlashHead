@@ -77,42 +77,49 @@ def set_muted(play_audio: bool):
 STUN_FALLBACK = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 
 
-def get_rtc_config():
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        logger.warning("未设置 HF_TOKEN：使用 STUN-only（跨公网 NAT 不保证连通，RunPod 建议配 TURN）")
-        return STUN_FALLBACK
+def get_rtc_config(ttl=360_000):
+    """TURN 凭证优先级: 自有 Cloudflare key(TURN_KEY_ID/TURN_KEY_API_TOKEN,
+    直连 CF API) > HF_TOKEN(fastrtc 免费网关,2026-07 其 DNS 故障中) > STUN-only。
+    ttl 用长值:配置在组件构造时静态求值一次,短 TTL 会导致服务启动一段时间后
+    新连接全部失败。"""
+    key_id = os.environ.get("TURN_KEY_ID")
+    api_token = os.environ.get("TURN_KEY_API_TOKEN")
+    hf_token = os.environ.get("HF_TOKEN")
     try:
         from fastrtc import get_cloudflare_turn_credentials
-        # 静态求值一次的配置必须用长 TTL(默认 600s 会导致启动 10 分钟后新连接全部失败)
-        return get_cloudflare_turn_credentials(hf_token=token, ttl=360_000)
+        if key_id and api_token:
+            logger.info("使用自有 Cloudflare TURN key")
+            return get_cloudflare_turn_credentials(
+                turn_key_id=key_id, turn_key_api_token=api_token, ttl=ttl)
+        if hf_token:
+            logger.info("使用 HF_TOKEN 经 fastrtc 网关获取 TURN 凭证")
+            return get_cloudflare_turn_credentials(hf_token=hf_token, ttl=ttl)
     except Exception as e:
-        logger.warning(f"获取 Cloudflare TURN 凭证失败({e})，回退 STUN-only（跨公网 NAT 不保证连通）")
+        logger.warning(f"获取 TURN 凭证失败({e})，回退 STUN-only（跨公网 NAT 不保证连通）")
         return STUN_FALLBACK
+    logger.warning("无 TURN 凭证（TURN_KEY_ID/HF_TOKEN 均未设置）：STUN-only，RunPod 上建议配 TURN")
+    return STUN_FALLBACK
 
 
 def build_webrtc_kwargs():
-    """客户端与服务端 ICE 都配 TURN（设计要求）。track_constraints 写法以 Task 4 PoC 结论为准。"""
+    """客户端与服务端 ICE 共用同一份 TURN 凭证（一次获取）。
+    上行视频无法关闭（fastrtc 0.0.34 前端硬编码，见 PoC 决策记录），
+    压到最低规格省带宽，帧在 video_receive 丢弃。"""
     import inspect
+    rtc_config = get_rtc_config()
     kwargs = dict(
         mode="send-receive",
         modality="audio-video",
-        rtc_configuration=get_rtc_config(),
+        rtc_configuration=rtc_config,
         track_constraints={
             "audio": {"echoCancellation": True, "noiseSuppression": True},
-            "video": False,
+            "video": {"width": {"ideal": 320}, "height": {"ideal": 240},
+                      "frameRate": {"ideal": 5}},
         },
     )
     params = inspect.signature(WebRTC.__init__).parameters
-    token = os.environ.get("HF_TOKEN")
-    if token and "server_rtc_configuration" in params:
-        try:
-            from fastrtc import get_cloudflare_turn_credentials
-            kwargs["server_rtc_configuration"] = get_cloudflare_turn_credentials(
-                hf_token=token, ttl=360_000,
-            )
-        except Exception as e:
-            logger.warning(f"获取服务端 TURN 凭证失败({e})，跳过服务端 ICE 配置")
+    if "server_rtc_configuration" in params:
+        kwargs["server_rtc_configuration"] = rtc_config
     return kwargs
 
 
