@@ -3,15 +3,15 @@
 延迟预期 ~1.5-2.5s（0.96s 攒片 + 生成 + 传输），严格实时请用 lite 档。
 RunPod 部署需 export HF_TOKEN=...（Cloudflare TURN 中继，免费 10GB/月）。
 """
+import asyncio
 import os
-import threading
 import time
 
 import gradio as gr
 import numpy as np
 import soxr
 from loguru import logger
-from fastrtc import AsyncAudioVideoStreamHandler, WebRTC
+from fastrtc import AsyncAudioVideoStreamHandler, WebRTC, wait_for_item
 
 from flash_head.inference import get_pipeline, get_base_data, get_infer_params
 from flash_head.realtime.binding import make_generate_chunk
@@ -20,7 +20,6 @@ from flash_head.realtime.processor import RealtimeProcessor
 OUT_SR = 48000
 FPS = 25
 RESAMPLE_BUF_SEC = 0.3   # 攒 0.3s 再重采样，摊薄调用开销
-AUDIO_BUF_CAP = OUT_SR   # 下行音频缓冲上限 1s，防单侧漂移
 
 
 class AppState:
@@ -151,8 +150,9 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
     def __init__(self):
         super().__init__(expected_layout="mono", output_sample_rate=OUT_SR, fps=FPS)
         self._recv_pending = np.zeros(0, dtype=np.float32)
-        self._audio_buf = np.zeros(0, dtype=np.float32)
-        self._buf_lock = threading.Lock()
+        # 下行音频经此队列从 video_emit(视频轨)交给 emit(音频轨)。二者由 fastrtc
+        # 绑到同一 handler 实例、同一事件循环,故 asyncio.Queue 安全且天然按实时速率节流。
+        self._audio_q: asyncio.Queue = asyncio.Queue()
         self._recv_sr = None
         # [diag] 无声排查:emit/receive 每 5 秒汇总一行(参照黑屏排查先例)
         self._diag = {"emit": 0, "emit_nonzero": 0, "recv": 0, "recv_voice": 0,
@@ -191,42 +191,39 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
             STATE.processor.add_audio(a16, aout)
 
     async def video_emit(self):
+        # 视频轨驱动:每帧从 processor 取一对(帧, 配对音频)。取到就把音频交给音频轨,
+        # 无配对(未说话/未生成)则只回空闲帧、不产音频——emit 侧对应返回 None(静音),
+        # 而非灌静音帧顶满队列(旧实现的无声根因)。
         pair = STATE.processor.get_pair() if STATE.processor else None
         if pair is None:
-            silence = np.zeros(OUT_SR // FPS, dtype=np.float32)
-            with self._buf_lock:
-                self._audio_buf = np.concatenate([self._audio_buf, silence])[-AUDIO_BUF_CAP:]
             if STATE.idle_frame is not None:
                 return STATE.idle_frame
             return np.zeros((512, 512, 3), dtype=np.uint8)
         frame_rgb, audio_seg = pair
-        with self._buf_lock:
-            self._audio_buf = np.concatenate([self._audio_buf, audio_seg])[-AUDIO_BUF_CAP:]
+        self._audio_q.put_nowait(audio_seg)
         return frame_rgb[:, :, ::-1].copy()  # RGB -> BGR（以 PoC 实测色彩为准）
 
     async def emit(self):
-        n = OUT_SR // 50  # 20ms
-        with self._buf_lock:
-            if len(self._audio_buf) >= n:
-                seg, self._audio_buf = self._audio_buf[:n], self._audio_buf[n:]
-            else:
-                seg = np.zeros(n, dtype=np.float32)
-        if STATE.muted:
-            seg = np.zeros(n, dtype=np.float32)
-        pcm = (np.clip(seg, -1, 1) * 32767).astype(np.int16).reshape(1, -1)
+        # 官方蓝本:await 等待队列出一段音频(最多 10ms),空则返回 None(该帧静音)。
+        # 关键的 await 点:既让出事件循环(修 issue #203 无 await 静默失败),
+        # 又让生产者(video_emit @ 实时)自然限速,不会灌爆 fastrtc 内部队列。
+        seg = await wait_for_item(self._audio_q, 0.01)
         self._diag["emit"] += 1
-        if np.abs(pcm).max() > 50:
-            self._diag["emit_nonzero"] += 1
+        if seg is not None and float(np.abs(seg).max()) > 0.0015:  # ≈50/32767
+            self._diag["emit_nonzero"] += 1  # 真实音频到达(计静音前)
         now = time.monotonic()
         if now - self._diag["t0"] >= 5.0:
-            with self._buf_lock:
-                buf_len = len(self._audio_buf)
             logger.info(
-                f"[diag] 5s窗口: emit={self._diag['emit']}次 非零={self._diag['emit_nonzero']} "
-                f"muted={STATE.muted} buf={buf_len}样本 "
+                f"[diag] 5s窗口: emit={self._diag['emit']}次 有音频帧非零={self._diag['emit_nonzero']} "
+                f"muted={STATE.muted} 队列={self._audio_q.qsize()}段 "
                 f"recv={self._diag['recv']}段 有声={self._diag['recv_voice']}段"
             )
             self._diag.update(emit=0, emit_nonzero=0, recv=0, recv_voice=0, t0=now)
+        if seg is None:
+            return None
+        if STATE.muted:
+            seg = np.zeros_like(seg)
+        pcm = (np.clip(seg, -1, 1) * 32767).astype(np.int16).reshape(1, -1)
         return (OUT_SR, pcm)
 
     async def shutdown(self):
