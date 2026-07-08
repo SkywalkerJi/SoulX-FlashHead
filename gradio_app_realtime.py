@@ -5,6 +5,7 @@ RunPod 部署需 export HF_TOKEN=...（Cloudflare TURN 中继，免费 10GB/月�
 """
 import os
 import threading
+import time
 
 import gradio as gr
 import numpy as np
@@ -153,6 +154,9 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         self._audio_buf = np.zeros(0, dtype=np.float32)
         self._buf_lock = threading.Lock()
         self._recv_sr = None
+        # [diag] 无声排查:emit/receive 每 5 秒汇总一行(参照黑屏排查先例)
+        self._diag = {"emit": 0, "emit_nonzero": 0, "recv": 0, "recv_voice": 0,
+                      "t0": time.monotonic()}
 
     async def video_receive(self, frame):
         pass  # 纯麦克风上行,不消费客户端视频(基类抽象方法需实现)
@@ -178,6 +182,9 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         if len(self._recv_pending) < int(sr * RESAMPLE_BUF_SEC):
             return
         seg, self._recv_pending = self._recv_pending, np.zeros(0, dtype=np.float32)
+        self._diag["recv"] += 1
+        if float(np.sqrt(np.mean(np.square(seg)))) > 0.01:
+            self._diag["recv_voice"] += 1
         a16 = soxr.resample(seg, sr, 16000).astype(np.float32) if sr != 16000 else seg
         aout = soxr.resample(seg, sr, OUT_SR).astype(np.float32) if sr != OUT_SR else seg
         if STATE.processor is not None:
@@ -207,6 +214,19 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         if STATE.muted:
             seg = np.zeros(n, dtype=np.float32)
         pcm = (np.clip(seg, -1, 1) * 32767).astype(np.int16).reshape(1, -1)
+        self._diag["emit"] += 1
+        if np.abs(pcm).max() > 50:
+            self._diag["emit_nonzero"] += 1
+        now = time.monotonic()
+        if now - self._diag["t0"] >= 5.0:
+            with self._buf_lock:
+                buf_len = len(self._audio_buf)
+            logger.info(
+                f"[diag] 5s窗口: emit={self._diag['emit']}次 非零={self._diag['emit_nonzero']} "
+                f"muted={STATE.muted} buf={buf_len}样本 "
+                f"recv={self._diag['recv']}段 有声={self._diag['recv_voice']}段"
+            )
+            self._diag.update(emit=0, emit_nonzero=0, recv=0, recv_voice=0, t0=now)
         return (OUT_SR, pcm)
 
     async def shutdown(self):
