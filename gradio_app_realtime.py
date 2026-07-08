@@ -7,6 +7,7 @@ import asyncio
 import os
 import time
 
+import cv2
 import gradio as gr
 import numpy as np
 import soxr
@@ -20,6 +21,9 @@ from flash_head.realtime.processor import RealtimeProcessor
 OUT_SR = 48000
 FPS = 25
 RESAMPLE_BUF_SEC = 0.3   # 攒 0.3s 再重采样，摊薄调用开销
+# 下行视频分辨率:模型出 512²,发送前缩到此尺寸。TURN 中继带宽/抖动敏感,
+# 像素少 44%(384²=512²×0.56)显著降码率,数字人场景帧率稳比清晰度更重要。
+DOWNLINK_SIZE = 384
 
 
 class AppState:
@@ -154,6 +158,7 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         # 绑到同一 handler 实例、同一事件循环,故 asyncio.Queue 安全且天然按实时速率节流。
         self._audio_q: asyncio.Queue = asyncio.Queue()
         self._recv_sr = None
+        self._last_frame = None  # 上一帧下行画面(BGR, DOWNLINK_SIZE²),队列排空时定格用
         # [diag] emit/receive/video_emit 每 5 秒汇总一行。vgap_ms=相邻出帧最大间隔,
         # 反映服务端视频交付是否周期性卡顿(理想应≈40ms=25fps)。
         self._diag = {"emit": 0, "emit_nonzero": 0, "recv": 0, "recv_voice": 0,
@@ -205,13 +210,20 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         pair = STATE.processor.get_pair() if STATE.processor else None
         if pair is None:
             self._diag["vidle"] += 1
-            if STATE.idle_frame is not None:
-                return STATE.idle_frame
-            return np.zeros((512, 512, 3), dtype=np.uint8)
+            # 队列瞬时排空(说话停顿):定格上一帧,而非切回中性脸——消除周期性抽动。
+            if self._last_frame is not None:
+                return self._last_frame
+            if STATE.idle_frame is not None:  # 尚无生成帧时才回退到中性脸(已 BGR)
+                return cv2.resize(STATE.idle_frame, (DOWNLINK_SIZE, DOWNLINK_SIZE),
+                                  interpolation=cv2.INTER_AREA)
+            return np.zeros((DOWNLINK_SIZE, DOWNLINK_SIZE, 3), dtype=np.uint8)
         frame_rgb, audio_seg = pair
         self._audio_q.put_nowait(audio_seg)
         self._diag["vreal"] += 1
-        return frame_rgb[:, :, ::-1].copy()  # RGB -> BGR（以 PoC 实测色彩为准）
+        # 先缩放再翻通道:cv2.resize 输出连续内存,翻成 BGR 后确保编码器拿到连续数组
+        small = cv2.resize(frame_rgb, (DOWNLINK_SIZE, DOWNLINK_SIZE), interpolation=cv2.INTER_AREA)
+        self._last_frame = np.ascontiguousarray(small[:, :, ::-1])  # RGB -> BGR
+        return self._last_frame
 
     async def emit(self):
         # 官方蓝本:await 等待队列出一段音频(最多 10ms),空则返回 None(该帧静音)。
