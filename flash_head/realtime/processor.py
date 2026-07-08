@@ -33,6 +33,7 @@ class RealtimeProcessor:
         output_sample_rate: int = 48000,
         noise_gate_rms: float = 0.0,
         max_backlog_chunks: int = 2,
+        max_output_backlog_chunks: Optional[int] = None,
     ):
         self._generate_chunk = generate_chunk
         self.slice_len = slice_len
@@ -41,6 +42,12 @@ class RealtimeProcessor:
         self.output_sample_rate = output_sample_rate
         self.noise_gate_rms = noise_gate_rms
         self.max_backlog_chunks = max_backlog_chunks
+        # 输出丢帧阈值与输入 cap 解耦:流畅优先时调大输出阈值(代价是延迟上限),
+        # 输入 cap 必须保持小,否则恢复后会逐片消化旧音频(见 add_audio)
+        self.max_output_backlog_chunks = (
+            max_output_backlog_chunks if max_output_backlog_chunks is not None
+            else max_backlog_chunks
+        )
 
         self.slice_samples_16k = slice_len * sample_rate // tgt_fps
         self.samples_per_frame_out = output_sample_rate // tgt_fps
@@ -64,7 +71,14 @@ class RealtimeProcessor:
             "dropped_frames": 0,
             "chunks_done": 0,
             "dropped_input_ms": 0.0,
+            "last_drop_ts": 0.0,  # 最近一次丢弃(输入或输出)的 monotonic 时刻
         }
+
+    def is_catching_up(self, window_s: float = 3.0) -> bool:
+        """最近 window_s 秒内发生过丢弃(输入旧音频或输出帧)→ 正在追赶。
+        供 UI 警告用:只在真丢弃时亮,队列高水位但稳定不算。"""
+        ts = self.stats["last_drop_ts"]
+        return ts > 0.0 and (time.monotonic() - ts) < window_s
 
     # ---------- 输入侧 ----------
     def add_audio(self, audio_16k: np.ndarray, audio_out: np.ndarray) -> None:
@@ -84,6 +98,7 @@ class RealtimeProcessor:
                 cut = len(self._pending_16k) - max_16k
                 self._pending_16k = self._pending_16k[cut:]
                 self.stats["dropped_input_ms"] += cut * 1000.0 / self.sample_rate
+                self.stats["last_drop_ts"] = time.monotonic()
             max_out = self.max_backlog_chunks * self.slice_samples_out
             if len(self._pending_out) > max_out:
                 self._pending_out = self._pending_out[len(self._pending_out) - max_out:]
@@ -128,14 +143,15 @@ class RealtimeProcessor:
         self.stats["last_chunk_ms"] = (time.monotonic() - t0) * 1000.0
         self.stats["chunks_done"] += 1
 
-        # 追赶：积压超过 max_backlog_chunks 个 chunk 时丢最旧一个 chunk
-        if self._pairs.qsize() >= self.max_backlog_chunks * self.slice_len:
+        # 追赶：积压超过 max_output_backlog_chunks 个 chunk 时丢最旧一个 chunk
+        if self._pairs.qsize() >= self.max_output_backlog_chunks * self.slice_len:
             for _ in range(self.slice_len):
                 try:
                     self._pairs.get_nowait()
                     self.stats["dropped_frames"] += 1
                 except queue.Empty:
                     break
+            self.stats["last_drop_ts"] = time.monotonic()
 
         spf = self.samples_per_frame_out
         for i in range(frames.shape[0]):

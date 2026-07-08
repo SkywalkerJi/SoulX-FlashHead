@@ -58,6 +58,9 @@ def load_model(ckpt_dir, wav2vec_dir, model_type, cond_image, seed, use_face_cro
         cached_audio_duration=params["cached_audio_duration"],
         output_sample_rate=OUT_SR,
         noise_gate_rms=float(noise_gate),
+        # 流畅优先:输出丢帧阈值放宽到 6 chunks(≈5.8s 延迟上限),
+        # 预热追赶留下的稳态水位(~2.3 chunks)不会再碰线触发整 chunk 跳帧
+        max_output_backlog_chunks=6,
     )
     STATE.processor.start()
 
@@ -133,8 +136,9 @@ def format_stats():
     slice_len = p.slice_len
     budget_ms = slice_len / p.tgt_fps * 1000
     fps_eff = slice_len / (s["last_chunk_ms"] / 1000) if s["last_chunk_ms"] > 0 else 0
-    # 按当前队列压力提示(而非累计丢帧数——预热期的一次性丢弃会让累计值永远>0)
-    warn = " ⚠️ 生成速度不足，正在丢帧追赶" if s["queue_depth"] >= p.max_backlog_chunks * slice_len else ""
+    # 按"最近是否真的在丢弃"提示——队列高水位但稳定(预热追赶残留)不算,
+    # 否则稳态 55 帧 ≥ 旧阈值 48 会让警告永久误亮(实测踩坑)
+    warn = " ⚠️ 正在丢弃积压追赶（画面可能跳变）" if p.is_catching_up() else ""
     return (
         f"chunk 耗时 **{s['last_chunk_ms']:.0f}ms** / 预算 {budget_ms:.0f}ms ｜ "
         f"有效 **{fps_eff:.1f} FPS** ｜ 队列 {s['queue_depth']} 帧 ｜ "

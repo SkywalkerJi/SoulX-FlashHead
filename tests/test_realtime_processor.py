@@ -172,3 +172,46 @@ def test_input_backlog_not_trimmed_below_cap():
     proc.add_audio(np.ones(SLICE_16K, np.float32), np.ones(SLICE_OUT, np.float32))
     assert len(proc._pending_16k) == SLICE_16K
     assert proc.stats["dropped_input_ms"] == 0.0
+
+
+def test_output_backlog_threshold_decoupled_from_input_cap():
+    """输出丢帧阈值独立于输入 cap:流畅优先场景把输出阈值调大,
+    输入 cap 保持小(否则恢复后会长时间消化旧音频)。"""
+    proc, _ = make_proc(max_backlog_chunks=2, max_output_backlog_chunks=4)
+    for _ in range(4):  # 4 chunk 不消费,未达输出阈值 → 一帧不丢
+        _feed_one_slice(proc)
+    assert proc.stats["dropped_frames"] == 0
+    assert proc._pairs.qsize() == 4 * SLICE_LEN
+    _feed_one_slice(proc)  # 第 5 次入队前 qsize=96 ≥ 4*24 → 丢最旧 24 帧
+    assert proc.stats["dropped_frames"] == SLICE_LEN
+    assert proc._pairs.qsize() == 4 * SLICE_LEN
+    # 输入 cap 不受影响,仍按 max_backlog_chunks=2 截断
+    proc.add_audio(np.ones(SLICE_16K * 5, np.float32), np.ones(SLICE_OUT * 5, np.float32))
+    assert len(proc._pending_16k) == 2 * SLICE_16K
+
+
+def test_output_drop_marks_catching_up():
+    """输出侧丢帧后 is_catching_up() 为真 — UI 警告只在真丢帧时亮。"""
+    proc, _ = make_proc(max_backlog_chunks=2)
+    assert not proc.is_catching_up()
+    for _ in range(3):  # 第 3 次触发输出丢帧
+        _feed_one_slice(proc)
+    assert proc.stats["dropped_frames"] == SLICE_LEN
+    assert proc.is_catching_up()
+
+
+def test_input_trim_marks_catching_up():
+    """输入侧丢弃旧音频(预热追赶)同样置起 catching_up。"""
+    proc, _ = make_proc(max_backlog_chunks=2)
+    proc.add_audio(np.ones(SLICE_16K * 5, np.float32), np.ones(SLICE_OUT * 5, np.float32))
+    assert proc.stats["dropped_input_ms"] > 0
+    assert proc.is_catching_up()
+
+
+def test_catching_up_expires_after_window():
+    """丢弃事件过了时间窗后警告熄灭(队列高水位但不再丢 → 不警告)。"""
+    proc, _ = make_proc(max_backlog_chunks=2)
+    for _ in range(3):
+        _feed_one_slice(proc)
+    assert proc.is_catching_up(window_s=10.0)
+    assert not proc.is_catching_up(window_s=0.0)  # 窗口为 0 → 立即过期
