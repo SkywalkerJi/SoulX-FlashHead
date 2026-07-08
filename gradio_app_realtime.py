@@ -154,8 +154,10 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         # 绑到同一 handler 实例、同一事件循环,故 asyncio.Queue 安全且天然按实时速率节流。
         self._audio_q: asyncio.Queue = asyncio.Queue()
         self._recv_sr = None
-        # [diag] 无声排查:emit/receive 每 5 秒汇总一行(参照黑屏排查先例)
+        # [diag] emit/receive/video_emit 每 5 秒汇总一行。vgap_ms=相邻出帧最大间隔,
+        # 反映服务端视频交付是否周期性卡顿(理想应≈40ms=25fps)。
         self._diag = {"emit": 0, "emit_nonzero": 0, "recv": 0, "recv_voice": 0,
+                      "vemit": 0, "vreal": 0, "vidle": 0, "vgap": 0.0, "vlast": 0.0,
                       "t0": time.monotonic()}
 
     async def video_receive(self, frame):
@@ -194,13 +196,21 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
         # 视频轨驱动:每帧从 processor 取一对(帧, 配对音频)。取到就把音频交给音频轨,
         # 无配对(未说话/未生成)则只回空闲帧、不产音频——emit 侧对应返回 None(静音),
         # 而非灌静音帧顶满队列(旧实现的无声根因)。
+        # [diag] 记录 video_emit 调用节奏:相邻两次的间隔,取窗口内最大值
+        now_v = time.monotonic()
+        if self._diag["vlast"] > 0.0:
+            self._diag["vgap"] = max(self._diag["vgap"], now_v - self._diag["vlast"])
+        self._diag["vlast"] = now_v
+        self._diag["vemit"] += 1
         pair = STATE.processor.get_pair() if STATE.processor else None
         if pair is None:
+            self._diag["vidle"] += 1
             if STATE.idle_frame is not None:
                 return STATE.idle_frame
             return np.zeros((512, 512, 3), dtype=np.uint8)
         frame_rgb, audio_seg = pair
         self._audio_q.put_nowait(audio_seg)
+        self._diag["vreal"] += 1
         return frame_rgb[:, :, ::-1].copy()  # RGB -> BGR（以 PoC 实测色彩为准）
 
     async def emit(self):
@@ -213,12 +223,16 @@ class AvatarHandler(AsyncAudioVideoStreamHandler):
             self._diag["emit_nonzero"] += 1  # 真实音频到达(计静音前)
         now = time.monotonic()
         if now - self._diag["t0"] >= 5.0:
+            win = now - self._diag["t0"]
+            vfps = self._diag["vemit"] / win if win > 0 else 0
             logger.info(
-                f"[diag] 5s窗口: emit={self._diag['emit']}次 有音频帧非零={self._diag['emit_nonzero']} "
-                f"muted={STATE.muted} 队列={self._audio_q.qsize()}段 "
+                f"[diag] 5s窗口: 视频出帧={self._diag['vemit']}(真{self._diag['vreal']}/空闲{self._diag['vidle']}) "
+                f"≈{vfps:.1f}fps 最大出帧间隔={self._diag['vgap']*1000:.0f}ms ｜ "
+                f"emit={self._diag['emit']}次 muted={STATE.muted} 队列={self._audio_q.qsize()}段 "
                 f"recv={self._diag['recv']}段 有声={self._diag['recv_voice']}段"
             )
-            self._diag.update(emit=0, emit_nonzero=0, recv=0, recv_voice=0, t0=now)
+            self._diag.update(emit=0, emit_nonzero=0, recv=0, recv_voice=0,
+                              vemit=0, vreal=0, vidle=0, vgap=0.0, t0=now)
         if seg is None:
             return None
         if STATE.muted:
